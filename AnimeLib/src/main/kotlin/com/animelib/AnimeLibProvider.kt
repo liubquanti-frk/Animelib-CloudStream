@@ -54,22 +54,25 @@ class AnimeLibProvider : MainAPI() {
 
     // ---------- Parsing helpers ----------
 
+    /** optString() turns JSON null into the string "null"; treat it as empty instead. */
+    private fun JSONObject.str(key: String): String = if (isNull(key)) "" else optString(key)
+
     private fun JSONObject.title(): String =
-        optString("rus_name").ifBlank { optString("eng_name") }.ifBlank { optString("name") }
+        str("rus_name").ifBlank { str("eng_name") }.ifBlank { str("name") }
 
     private fun JSONObject.poster(): String? =
         optJSONObject("cover")?.let { c ->
-            c.optString("default").ifBlank { c.optString("thumbnail") }.ifBlank { null }
+            c.str("default").ifBlank { c.str("thumbnail") }.ifBlank { null }
         }
 
-    private fun JSONObject.tvType(): TvType = when (optJSONObject("type")?.optString("label")) {
+    private fun JSONObject.tvType(): TvType = when (optJSONObject("type")?.str("label")) {
         "Фильм" -> TvType.AnimeMovie
         "OVA", "ONA", "Спешл", "Спешиал" -> TvType.OVA
         else -> TvType.Anime
     }
 
     private fun toSearch(o: JSONObject): SearchResponse =
-        newAnimeSearchResponse(o.title(), "$mainUrl/ru/anime/${o.optString("slug_url")}", o.tvType()) {
+        newAnimeSearchResponse(o.title(), "$mainUrl/ru/anime/${o.str("slug_url")}", o.tvType()) {
             posterUrl = o.poster()
             posterHeaders = this@AnimeLibProvider.posterHeaders
         }
@@ -82,9 +85,9 @@ class AnimeLibProvider : MainAPI() {
         is String -> any
         is JSONObject -> {
             val sb = StringBuilder()
-            if (any.optString("type") == "text") sb.append(any.optString("text"))
+            if (any.str("type") == "text") sb.append(any.str("text"))
             any.optJSONArray("content")?.let { sb.append(proseToText(it)) }
-            if (any.optString("type") == "paragraph") sb.append("\n")
+            if (any.str("type") == "paragraph") sb.append("\n")
             sb.toString()
         }
         is JSONArray -> (0 until any.length()).joinToString("") { proseToText(any.opt(it)) }
@@ -126,32 +129,32 @@ class AnimeLibProvider : MainAPI() {
             Triple(
                 e.optLong("id"),
                 e,
-                e.optString("number").toDoubleOrNull()?.toInt() ?: (i + 1),
+                e.str("number").toDoubleOrNull()?.toInt() ?: (i + 1),
             )
         }
 
         fun build(kind: String) = episodes.map { (id, e, num) ->
             newEpisode("$id|$kind") {
-                this.name = e.optString("name").ifBlank { null }
+                this.name = e.str("name").ifBlank { null }
                 this.episode = num
-                this.season = e.optString("season").toIntOrNull()
+                this.season = e.str("season").toIntOrNull()
             }
         }
 
         val genres = d.optJSONArray("genres")?.let { g ->
-            (0 until g.length()).map { g.getJSONObject(it).optString("name") }
+            (0 until g.length()).map { g.getJSONObject(it).str("name") }
         }
-        val year = d.optString("releaseDate").take(4).toIntOrNull()
-        val rating = d.optJSONObject("rating")?.optString("average")?.toDoubleOrNull()
-        val statusLabel = d.optJSONObject("status")?.optString("label")
-        val background = d.optString("anilist_id").toIntOrNull()?.let { anilistBackground(it) }
+        val year = d.str("releaseDate").take(4).toIntOrNull()
+        val rating = d.optJSONObject("rating")?.str("average")?.toDoubleOrNull()
+        val statusLabel = d.optJSONObject("status")?.str("label")
+        val background = d.str("anilist_id").toIntOrNull()?.let { anilistBackground(it) }
 
         return newAnimeLoadResponse(d.title(), url, d.tvType()) {
             posterUrl = d.poster()
             posterHeaders = this@AnimeLibProvider.posterHeaders
             backgroundPosterUrl = background
-            engName = d.optString("eng_name").ifBlank { null }
-            japName = d.optString("name").ifBlank { null }
+            engName = d.str("eng_name").ifBlank { null }
+            japName = d.str("name").ifBlank { null }
             plot = proseToText(d.opt("summary")).ifBlank { null }
             tags = genres
             this.year = year
@@ -180,8 +183,8 @@ class AnimeLibProvider : MainAPI() {
             headers = mapOf("Accept" to "application/json"),
         ).text
         val m = JSONObject(text).getJSONObject("data").getJSONObject("Media")
-        m.optString("bannerImage").takeIf { it.startsWith("http") }
-            ?: m.optJSONObject("coverImage")?.optString("extraLarge")?.takeIf { it.startsWith("http") }
+        m.str("bannerImage").takeIf { it.startsWith("http") }
+            ?: m.optJSONObject("coverImage")?.str("extraLarge")?.takeIf { it.startsWith("http") }
     }.getOrNull()
 
     // ---------- Links ----------
@@ -200,13 +203,13 @@ class AnimeLibProvider : MainAPI() {
         data class Src(val team: String, val src: String)
 
         val sources = (0 until players.length()).map { players.getJSONObject(it) }
-            .filter { it.optString("player") == "Kodik" && it.optString("src").isNotBlank() }
+            .filter { it.str("player") == "Kodik" && it.str("src").isNotBlank() }
             .filter {
-                val isSub = it.optJSONObject("translation_type")?.optString("label")
+                val isSub = it.optJSONObject("translation_type")?.str("label")
                     ?.contains("Субтитр") == true
                 isSub == wantSub
             }
-            .map { Src(it.optJSONObject("team")?.optString("name") ?: "Kodik", it.optString("src")) }
+            .map { Src(it.optJSONObject("team")?.str("name") ?: "Kodik", it.str("src")) }
             .distinctBy { it.src }
 
         var found = false
@@ -265,7 +268,7 @@ class AnimeLibProvider : MainAPI() {
         val best = links.keys().asSequence()
             .mapNotNull { k -> k.toIntOrNull()?.let { it to k } }
             .maxByOrNull { it.first } ?: return null
-        val raw = links.getJSONArray(best.second).getJSONObject(0).optString("src")
+        val raw = links.getJSONArray(best.second).getJSONObject(0).str("src")
         val url = if (raw.contains("//")) raw else decodeKodik(raw)
         return best.first to (if (url.startsWith("//")) "https:$url" else url)
     }
