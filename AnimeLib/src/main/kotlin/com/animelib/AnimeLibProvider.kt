@@ -172,7 +172,7 @@ class AnimeLibProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val episodeId = data.substringBefore("|")
+        val episodeId = data.substringBefore("|").substringAfterLast("/").trim()
         val wantSub = data.substringAfter("|", "dub") == "sub"
         val players = apiGet("/episodes/$episodeId").getJSONObject("data").optJSONArray("players")
             ?: return false
