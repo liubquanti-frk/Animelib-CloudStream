@@ -215,26 +215,28 @@ class AnimeLibProvider : MainAPI() {
         var found = false
         sources.amap { s ->
             runCatching {
-                val (quality, link) = resolveKodik(s.src) ?: return@runCatching
-                found = true
-                callback(
-                    newExtractorLink(
-                        source = s.team,
-                        name = s.team,
-                        url = link,
-                        type = ExtractorLinkType.M3U8,
-                    ) {
-                        this.referer = "https://kodikplayer.com/"
-                        this.quality = quality
-                    }
-                )
+                val qualities = resolveKodik(s.src) ?: return@runCatching
+                if (qualities.isNotEmpty()) found = true
+                qualities.forEach { (quality, link) ->
+                    callback(
+                        newExtractorLink(
+                            source = s.team,
+                            name = s.team,
+                            url = link,
+                            type = ExtractorLinkType.M3U8,
+                        ) {
+                            this.referer = "https://kodikplayer.com/"
+                            this.quality = quality
+                        }
+                    )
+                }
             }
         }
         return found
     }
 
-    /** Returns best quality HLS link of a Kodik player page. */
-    private suspend fun resolveKodik(src: String): Pair<Int, String>? {
+    /** Returns all (quality, HLS link) pairs of a Kodik player page, best first. */
+    private suspend fun resolveKodik(src: String): List<Pair<Int, String>>? {
         val pageUrl = if (src.startsWith("//")) "https:$src" else src
         val host = pageUrl.substringAfter("://").substringBefore("/")
         val html = app.get(pageUrl, headers = mapOf("User-Agent" to ua, "Referer" to "$mainUrl/")).text
@@ -265,12 +267,16 @@ class AnimeLibProvider : MainAPI() {
             data = form,
         ).text
         val links = JSONObject(resp).optJSONObject("links") ?: return null
-        val best = links.keys().asSequence()
+        return links.keys().asSequence()
             .mapNotNull { k -> k.toIntOrNull()?.let { it to k } }
-            .maxByOrNull { it.first } ?: return null
-        val raw = links.getJSONArray(best.second).getJSONObject(0).str("src")
-        val url = if (raw.contains("//")) raw else decodeKodik(raw)
-        return best.first to (if (url.startsWith("//")) "https:$url" else url)
+            .sortedByDescending { it.first }
+            .mapNotNull { (quality, key) ->
+                val raw = links.optJSONArray(key)?.optJSONObject(0)?.str("src")
+                    ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val url = if (raw.contains("//")) raw else decodeKodik(raw)
+                quality to (if (url.startsWith("//")) "https:$url" else url)
+            }
+            .toList()
     }
 
     /** Kodik obfuscation: Caesar +18 over letters, then base64. */
