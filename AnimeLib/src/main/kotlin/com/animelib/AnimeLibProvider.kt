@@ -2,6 +2,8 @@ package com.animelib
 
 import android.util.Base64
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.utils.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -151,12 +153,19 @@ class AnimeLibProvider : MainAPI() {
         val year = d.str("releaseDate").take(4).toIntOrNull()
         val rating = d.optJSONObject("rating")?.str("average")?.toDoubleOrNull()
         val statusLabel = d.optJSONObject("status")?.str("label")
-        val background = d.str("anilist_id").toIntOrNull()?.let { anilistBackground(it) }
+        // Many titles have anilist_id = null, but Shikimori ids are MAL ids.
+        val anilistId = d.str("anilist_id").toIntOrNull()
+        val shikiMalId = Regex("""/animes/\D*(\d+)""").find(d.str("shikimori_href"))
+            ?.groupValues?.get(1)?.toIntOrNull()
+        val anilist = anilistInfo(anilistId, shikiMalId)
 
         return newAnimeLoadResponse(d.title(), url, d.tvType()) {
             posterUrl = d.poster()
             posterHeaders = this@AnimeLibProvider.posterHeaders
-            backgroundPosterUrl = background
+            backgroundPosterUrl = anilist?.background
+            // Lets CloudStream's AniList / MAL sync track progress for this title.
+            addAniListId(anilistId ?: anilist?.id)
+            addMalId(anilist?.malId ?: shikiMalId)
             engName = d.str("eng_name").ifBlank { null }
             japName = d.str("name").ifBlank { null }
             plot = proseToText(d.opt("summary")).ifBlank { null }
@@ -175,20 +184,32 @@ class AnimeLibProvider : MainAPI() {
         }
     }
 
+    private data class AniListInfo(val id: Int?, val malId: Int?, val background: String?)
+
     /**
-     * Wide background from AniList. AnimeLib covers need a Referer header, which some
-     * CloudStream views (e.g. the home hero banner) don't send, so they fail with 403.
+     * AniList / MAL ids and a wide background, looked up by AniList id or, failing that, by
+     * MAL id. AnimeLib covers need a Referer header, which some CloudStream views (e.g. the
+     * home hero banner) don't send, so they fail with 403.
      */
-    private suspend fun anilistBackground(id: Int): String? = runCatching {
-        val body = """{"query":"query(${'$'}id:Int){Media(id:${'$'}id){bannerImage coverImage{extraLarge}}}","variables":{"id":$id}}"""
+    private suspend fun anilistInfo(id: Int?, malId: Int?): AniListInfo? = runCatching {
+        val (arg, value) = when {
+            id != null -> "id" to id
+            malId != null -> "idMal" to malId
+            else -> return null
+        }
+        val body = """{"query":"query(${'$'}v:Int){Media($arg:${'$'}v,type:ANIME){id idMal bannerImage coverImage{extraLarge}}}","variables":{"v":$value}}"""
         val text = app.post(
             "https://graphql.anilist.co",
             requestBody = body.toRequestBody("application/json".toMediaType()),
             headers = mapOf("Accept" to "application/json"),
         ).text
         val m = JSONObject(text).getJSONObject("data").getJSONObject("Media")
-        m.str("bannerImage").takeIf { it.startsWith("http") }
-            ?: m.optJSONObject("coverImage")?.str("extraLarge")?.takeIf { it.startsWith("http") }
+        AniListInfo(
+            id = m.str("id").toIntOrNull(),
+            malId = m.str("idMal").toIntOrNull(),
+            background = m.str("bannerImage").takeIf { it.startsWith("http") }
+                ?: m.optJSONObject("coverImage")?.str("extraLarge")?.takeIf { it.startsWith("http") },
+        )
     }.getOrNull()
 
     // ---------- Links ----------
