@@ -7,6 +7,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.ResponseBody.Companion.toResponseBody
+import okhttp3.Interceptor
+import okhttp3.Protocol
+import okhttp3.Response
 import java.net.URLEncoder
 
 class AnimeLibProvider : MainAPI() {
@@ -216,24 +220,83 @@ class AnimeLibProvider : MainAPI() {
         sources.amap { s ->
             runCatching {
                 val qualities = resolveKodik(s.src) ?: return@runCatching
-                if (qualities.isNotEmpty()) found = true
-                qualities.forEach { (quality, link) ->
-                    callback(
-                        newExtractorLink(
-                            source = s.team,
-                            name = s.team,
-                            url = link,
-                            type = ExtractorLinkType.M3U8,
-                        ) {
-                            this.referer = "https://kodikplayer.com/"
-                            this.quality = quality
-                        }
-                    )
+                if (qualities.isEmpty()) return@runCatching
+                found = true
+                if (isCasting) {
+                    // Cast receivers can't use our interceptor: give plain per-quality links.
+                    qualities.forEach { (quality, link) ->
+                        callback(kodikLink(s.team, link, quality))
+                    }
+                } else {
+                    // One entry per dub team; qualities are switched inside the player.
+                    callback(kodikLink(s.team, masterUrl(qualities), qualities.first().first))
                 }
             }
         }
         return found
     }
+
+    private suspend fun kodikLink(team: String, url: String, quality: Int) =
+        newExtractorLink(
+            // source must equal the provider name so the player asks us for the interceptor
+            source = name,
+            name = team,
+            url = url,
+            type = ExtractorLinkType.M3U8,
+        ) {
+            this.referer = "https://kodikplayer.com/"
+            this.quality = quality
+        }
+
+    // ---------- Virtual HLS master playlist ----------
+    // Kodik serves every quality as a separate media playlist. We pack them into a fake URL
+    // and answer it from an OkHttp interceptor with a master playlist, so ExoPlayer sees one
+    // stream with several video tracks and the user can pick the quality in the player.
+
+    private val masterHost = "animelib-master.invalid"
+
+    private fun masterUrl(qualities: List<Pair<Int, String>>): String {
+        val json = JSONArray().apply {
+            qualities.forEach { (q, u) -> put(JSONObject().put("q", q).put("u", u)) }
+        }.toString()
+        val enc = Base64.encodeToString(
+            json.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
+        )
+        return "https://$masterHost/master.m3u8?d=$enc"
+    }
+
+    private fun buildMaster(encoded: String): String {
+        val arr = JSONArray(String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)))
+        val sb = StringBuilder("#EXTM3U\n#EXT-X-VERSION:3\n")
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            val q = o.getInt("q")
+            val width = q * 16 / 9
+            val bandwidth = when {
+                q >= 1080 -> 5_000_000
+                q >= 720 -> 2_800_000
+                q >= 480 -> 1_400_000
+                else -> 800_000
+            }
+            sb.append("#EXT-X-STREAM-INF:BANDWIDTH=$bandwidth,RESOLUTION=${width}x$q,NAME=\"${q}p\"\n")
+            sb.append(o.getString("u")).append('\n')
+        }
+        return sb.toString()
+    }
+
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor =
+        Interceptor { chain ->
+            val req = chain.request()
+            val d = req.url.queryParameter("d")
+            if (req.url.host != masterHost || d == null) return@Interceptor chain.proceed(req)
+            Response.Builder()
+                .request(req)
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(buildMaster(d).toResponseBody("application/vnd.apple.mpegurl".toMediaType()))
+                .build()
+        }
 
     /** Returns all (quality, HLS link) pairs of a Kodik player page, best first. */
     private suspend fun resolveKodik(src: String): List<Pair<Int, String>>? {
