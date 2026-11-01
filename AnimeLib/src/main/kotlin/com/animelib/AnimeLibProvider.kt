@@ -229,7 +229,7 @@ class AnimeLibProvider : MainAPI() {
                     }
                 } else {
                     // One entry per dub team; qualities are switched inside the player.
-                    callback(kodikLink(s.team, masterUrl(qualities), qualities.first().first))
+                    callback(kodikLink(s.team, masterUrl(qualities), Qualities.Unknown.value))
                 }
             }
         }
