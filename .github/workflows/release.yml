@@ -19,24 +19,27 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
 
-      - name: Get previous build.gradle.kts
-        run: |
-          git show HEAD^:AnimeLib/build.gradle.kts > build_old.gradle.kts || echo "no previous build.gradle.kts" > build_old.gradle.kts
-
-      - name: Check if version changed
+      - name: Check if version is not released yet
         id: check
         shell: bash
         run: |
-          old_version=$(grep -E '^val versionName\s*=' build_old.gradle.kts | sed -E 's/.*"(.*)".*/\1/')
-          new_version=$(grep -E '^val versionName\s*=' AnimeLib/build.gradle.kts | sed -E 's/.*"(.*)".*/\1/')
+          new_version=$(sed -nE 's/^val versionName\s*=\s*"(.*)".*/\1/p' AnimeLib/build.gradle.kts)
+          echo "Version: $new_version"
 
-          echo "Old version: $old_version"
-          echo "New version: $new_version"
+          if [ -z "$new_version" ]; then
+            echo "versionName not found in AnimeLib/build.gradle.kts"
+            exit 1
+          fi
 
-          if [ -n "$new_version" ] && { [ "$old_version" != "$new_version" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; }; then
+          if git ls-remote --exit-code --tags origin "refs/tags/v$new_version" > /dev/null; then
+            echo "Tag v$new_version already exists"
+            released=true
+          else
+            released=false
+          fi
+
+          if [ "$released" = "false" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "version_changed=true" >> $GITHUB_OUTPUT
             echo "new_version=$new_version" >> $GITHUB_OUTPUT
           else
