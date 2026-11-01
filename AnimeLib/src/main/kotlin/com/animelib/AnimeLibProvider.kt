@@ -114,7 +114,7 @@ class AnimeLibProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val slug = slugFromUrl(url)
         val fields = listOf(
-            "summary", "genres", "releaseDate", "rate_avg", "rate", "status", "episodes_count", "otherNames"
+            "summary", "genres", "releaseDate", "rate_avg", "rate", "episodes_count", "otherNames"
         ).joinToString("&") { "fields[]=$it" }
         val d = apiGet("/anime/$slug?$fields").getJSONObject("data")
 

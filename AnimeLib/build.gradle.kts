@@ -1,5 +1,5 @@
 // Use an integer for version numbers
-version = 1
+version = 2
 
 cloudstream {
     description = "AnimeLib (animelib.org): каталог, пошук, озвучки та субтитри через Kodik"
