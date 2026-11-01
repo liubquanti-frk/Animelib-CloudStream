@@ -1,0 +1,89 @@
+name: Build and Release CloudStream Plugin
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version_changed: ${{ steps.check.outputs.version_changed }}
+      new_version: ${{ steps.check.outputs.new_version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Get previous build.gradle.kts
+        run: |
+          git show HEAD^:AnimeLib/build.gradle.kts > build_old.gradle.kts || echo "no previous build.gradle.kts" > build_old.gradle.kts
+
+      - name: Check if version changed
+        id: check
+        shell: bash
+        run: |
+          old_version=$(grep -E '^version\s*=' build_old.gradle.kts | sed -E 's/version\s*=\s*//' | tr -d '[:space:]')
+          new_version=$(grep -E '^version\s*=' AnimeLib/build.gradle.kts | sed -E 's/version\s*=\s*//' | tr -d '[:space:]')
+
+          echo "Old version: $old_version"
+          echo "New version: $new_version"
+
+          if [ -n "$new_version" ] && { [ "$old_version" != "$new_version" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; }; then
+            echo "version_changed=true" >> $GITHUB_OUTPUT
+            echo "new_version=$new_version" >> $GITHUB_OUTPUT
+          else
+            echo "version_changed=false" >> $GITHUB_OUTPUT
+          fi
+
+  build-and-release:
+    needs: check-version
+    if: needs.check-version.outputs.version_changed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build plugin
+        run: |
+          chmod +x gradlew
+          ./gradlew make makePluginsJson
+
+      - name: Point plugins.json to release assets
+        run: |
+          base="https://github.com/${{ github.repository }}/releases/latest/download"
+          jq --arg base "$base" 'map(.url = "\($base)/\(.internalName).cs3")' build/plugins.json > plugins.json
+          cat plugins.json
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check-version.outputs.new_version }}
+          name: "v${{ needs.check-version.outputs.new_version }}"
+          body: "Release of version v${{ needs.check-version.outputs.new_version }} for ${{ github.repository }}."
+          files: |
+            AnimeLib/build/AnimeLib.cs3
+            plugins.json
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

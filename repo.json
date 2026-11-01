@@ -1,0 +1,8 @@
+{
+  "name": "AnimeLib",
+  "description": "AnimeLib (animelib.org) для CloudStream",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://github.com/liubquanti-frk/Animelib-CloudStream/releases/latest/download/plugins.json"
+  ]
+}
