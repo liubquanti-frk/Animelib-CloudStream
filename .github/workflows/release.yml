@@ -30,8 +30,8 @@ jobs:
         id: check
         shell: bash
         run: |
-          old_version=$(grep -E '^version\s*=' build_old.gradle.kts | sed -E 's/version\s*=\s*//' | tr -d '[:space:]')
-          new_version=$(grep -E '^version\s*=' AnimeLib/build.gradle.kts | sed -E 's/version\s*=\s*//' | tr -d '[:space:]')
+          old_version=$(grep -E '^val versionName\s*=' build_old.gradle.kts | sed -E 's/.*"(.*)".*/\1/')
+          new_version=$(grep -E '^val versionName\s*=' AnimeLib/build.gradle.kts | sed -E 's/.*"(.*)".*/\1/')
 
           echo "Old version: $old_version"
           echo "New version: $new_version"

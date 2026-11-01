@@ -29,4 +29,4 @@ On Windows use `gradlew.bat`.
 
 ## Releases
 
-Releases are published automatically by GitHub Actions ([release.yml](.github/workflows/release.yml)) on push to `main` when `version` in [`AnimeLib/build.gradle.kts`](AnimeLib/build.gradle.kts) changes. The workflow can also be run manually (Actions → *Run workflow*).
+Releases are published automatically by GitHub Actions ([release.yml](.github/workflows/release.yml)) on push to `main` when `versionName` in [`AnimeLib/build.gradle.kts`](AnimeLib/build.gradle.kts) changes (semver, e.g. `0.1.0`; the integer version required by CloudStream is derived from it). The workflow can also be run manually (Actions → *Run workflow*).
