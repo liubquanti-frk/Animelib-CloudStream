@@ -5,6 +5,8 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.json.JSONArray
 import org.json.JSONObject
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLEncoder
 
 class AnimeLibProvider : MainAPI() {
@@ -142,10 +144,12 @@ class AnimeLibProvider : MainAPI() {
         val year = d.optString("releaseDate").take(4).toIntOrNull()
         val rating = d.optJSONObject("rating")?.optString("average")?.toDoubleOrNull()
         val statusLabel = d.optJSONObject("status")?.optString("label")
+        val background = d.optString("anilist_id").toIntOrNull()?.let { anilistBackground(it) }
 
         return newAnimeLoadResponse(d.title(), url, d.tvType()) {
             posterUrl = d.poster()
             posterHeaders = this@AnimeLibProvider.posterHeaders
+            backgroundPosterUrl = background
             engName = d.optString("eng_name").ifBlank { null }
             japName = d.optString("name").ifBlank { null }
             plot = proseToText(d.opt("summary")).ifBlank { null }
@@ -163,6 +167,22 @@ class AnimeLibProvider : MainAPI() {
             }
         }
     }
+
+    /**
+     * Wide background from AniList. AnimeLib covers need a Referer header, which some
+     * CloudStream views (e.g. the home hero banner) don't send, so they fail with 403.
+     */
+    private suspend fun anilistBackground(id: Int): String? = runCatching {
+        val body = """{"query":"query(${'$'}id:Int){Media(id:${'$'}id){bannerImage coverImage{extraLarge}}}","variables":{"id":$id}}"""
+        val text = app.post(
+            "https://graphql.anilist.co",
+            requestBody = body.toRequestBody("application/json".toMediaType()),
+            headers = mapOf("Accept" to "application/json"),
+        ).text
+        val m = JSONObject(text).getJSONObject("data").getJSONObject("Media")
+        m.optString("bannerImage").takeIf { it.startsWith("http") }
+            ?: m.optJSONObject("coverImage")?.optString("extraLarge")?.takeIf { it.startsWith("http") }
+    }.getOrNull()
 
     // ---------- Links ----------
 
