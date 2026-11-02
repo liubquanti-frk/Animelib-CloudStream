@@ -20,5 +20,5 @@ cloudstream {
     requiresResources = false
     language = "ru"
 
-    iconUrl = "https://www.google.com/s2/favicons?domain=animelib.org&sz=%size%"
+    iconUrl = "https://animelib.org/static/images/logo/al/icon-180.png"
 }
