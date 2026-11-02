@@ -1,5 +1,5 @@
 // Release version (semver). Used for the GitHub release tag.
-val versionName = "0.1.0"
+val versionName = "0.1.1"
 
 // CloudStream requires an integer version: MAJOR * 10000 + MINOR * 100 + PATCH
 version = versionName.split(".").map { it.toInt() }.let { (major, minor, patch) ->
