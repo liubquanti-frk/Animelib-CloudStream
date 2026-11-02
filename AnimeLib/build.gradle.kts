@@ -7,7 +7,7 @@ version = versionName.split(".").map { it.toInt() }.let { (major, minor, patch) 
 }
 
 cloudstream {
-    description = "AnimeLib (animelib.org): каталог, пошук, озвучки та субтитри через Kodik"
+    description = "AnimeLib (animelib.org)"
     authors = listOf("liubquanti")
 
     /**
