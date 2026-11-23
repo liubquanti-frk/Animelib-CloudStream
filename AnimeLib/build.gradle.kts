@@ -1,5 +1,5 @@
 // Release version (semver). Used for the GitHub release tag.
-val versionName = "0.1.0"
+val versionName = "0.1.1"
 
 // CloudStream requires an integer version: MAJOR * 10000 + MINOR * 100 + PATCH
 version = versionName.split(".").map { it.toInt() }.let { (major, minor, patch) ->
@@ -7,8 +7,8 @@ version = versionName.split(".").map { it.toInt() }.let { (major, minor, patch) 
 }
 
 cloudstream {
-    description = "AnimeLib (animelib.org): каталог, пошук, озвучки та субтитри через Kodik"
-    authors = listOf("dorol")
+    description = "AnimeLib (animelib.org)"
+    authors = listOf("liubquanti")
 
     /**
      * 0: Down, 1: Ok, 2: Slow, 3: Beta-only
@@ -20,5 +20,5 @@ cloudstream {
     requiresResources = false
     language = "ru"
 
-    iconUrl = "https://www.google.com/s2/favicons?domain=animelib.org&sz=%size%"
+    iconUrl = "https://animelib.org/static/images/logo/al/icon-180.png"
 }
