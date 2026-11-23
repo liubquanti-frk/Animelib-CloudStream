@@ -4,6 +4,8 @@ import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
+import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKeyClass
+import com.lagradost.cloudstream3.CloudStreamApp.Companion.setKey
 import com.lagradost.cloudstream3.utils.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -237,24 +239,44 @@ class AnimeLibProvider : MainAPI() {
             .map { Src(it.optJSONObject("team")?.str("name") ?: "Kodik", it.str("src")) }
             .distinctBy { it.src }
 
-        var found = false
-        sources.amap { s ->
-            runCatching {
-                val qualities = resolveKodik(s.src) ?: return@runCatching
-                if (qualities.isEmpty()) return@runCatching
-                found = true
-                if (isCasting) {
-                    // Cast receivers can't use our interceptor: give plain per-quality links.
-                    qualities.forEach { (quality, link) ->
-                        callback(kodikLink(s.team, link, quality))
-                    }
-                } else {
-                    // One entry per dub team; qualities are switched inside the player.
-                    callback(kodikLink(s.team, masterUrl(qualities), Qualities.Unknown.value))
+        // Resolve in parallel, but hand the links over in a fixed order: every link has the
+        // same priority, so the player starts the first one it got. Recently used dubs go first.
+        val resolved = sources.amap { s ->
+            s to runCatching { resolveKodik(s.src) }.getOrNull().orEmpty()
+        }.filter { it.second.isNotEmpty() }
+
+        val recent = recentDubs()
+        val ordered = resolved.sortedBy { (s, _) ->
+            recent.indexOf(s.team).let { if (it < 0) Int.MAX_VALUE else it }
+        }
+        ordered.forEach { (s, qualities) ->
+            if (isCasting) {
+                // Cast receivers can't use our interceptor: give plain per-quality links.
+                qualities.forEach { (quality, link) ->
+                    callback(kodikLink(s.team, link, quality))
                 }
+            } else {
+                // One entry per dub team; qualities are switched inside the player.
+                callback(kodikLink(s.team, masterUrl(qualities), Qualities.Unknown.value))
             }
         }
-        return found
+        return ordered.isNotEmpty()
+    }
+
+    // ---------- Remembered dub ----------
+    // The player asks for the video interceptor only for the link it actually plays, so that
+    // is where we learn which dub was picked. Kept as a most-recently-used list, so each title
+    // gets the dub last used among the ones it has.
+
+    private val recentDubsKey = "animelib_recent_dubs"
+
+    private fun recentDubs(): List<String> =
+        runCatching { getKeyClass(recentDubsKey, String::class.java) }.getOrNull()
+            ?.split('\n')?.filter { it.isNotBlank() }.orEmpty()
+
+    private fun rememberDub(team: String) = runCatching {
+        val updated = listOf(team) + recentDubs().filter { it != team }
+        setKey(recentDubsKey, updated.take(30).joinToString("\n"))
     }
 
     private suspend fun kodikLink(team: String, url: String, quality: Int) =
@@ -305,8 +327,9 @@ class AnimeLibProvider : MainAPI() {
         return sb.toString()
     }
 
-    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor =
-        Interceptor { chain ->
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
+        rememberDub(extractorLink.name)
+        return Interceptor { chain ->
             val req = chain.request()
             val d = req.url.queryParameter("d")
             if (req.url.host != masterHost || d == null) return@Interceptor chain.proceed(req)
@@ -318,6 +341,7 @@ class AnimeLibProvider : MainAPI() {
                 .body(buildMaster(d).toResponseBody("application/vnd.apple.mpegurl".toMediaType()))
                 .build()
         }
+    }
 
     /** Returns all (quality, HLS link) pairs of a Kodik player page, best first. */
     private suspend fun resolveKodik(src: String): List<Pair<Int, String>>? {
