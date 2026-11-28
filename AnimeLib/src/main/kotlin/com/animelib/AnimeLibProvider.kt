@@ -4,6 +4,7 @@ import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKeyClass
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.setKey
 import com.lagradost.cloudstream3.utils.*
@@ -16,6 +17,8 @@ import okhttp3.Interceptor
 import okhttp3.Protocol
 import okhttp3.Response
 import java.net.URLEncoder
+import java.util.Calendar
+import java.util.Locale
 
 class AnimeLibProvider : MainAPI() {
     override var mainUrl = "https://animelib.org"
@@ -37,9 +40,19 @@ class AnimeLibProvider : MainAPI() {
     )
     private val posterHeaders = mapOf("User-Agent" to ua, "Referer" to "$mainUrl/")
 
+    companion object {
+        /** Season number AnimeLib uses for specials and recaps */
+        private const val SPECIALS_SEASON = 10000
+
+        /** Main page row that is built by [currentSeason] instead of a catalog filter */
+        private const val CURRENT_SEASON = "current_season"
+    }
+
     override val mainPage = mainPageOf(
-        "" to "Популярне",
         "sort_by=last_episode_at&sort_type=desc" to "Нові серії",
+        "" to "Популярне",
+        "status[]=1" to "Онгоінги",
+        CURRENT_SEASON to "Сезон: ${seasonOf(Calendar.getInstance()).label}",
         "sort_by=rate_avg&sort_type=desc" to "Найвищий рейтинг",
         "sort_by=created_at&sort_type=desc" to "Нещодавно додані",
     )
@@ -105,6 +118,11 @@ class AnimeLibProvider : MainAPI() {
     // ---------- Main page / search ----------
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        if (request.data == CURRENT_SEASON) {
+            // Built in one go, so there is no second page
+            val list = if (page == 1) currentSeason() else emptyList()
+            return newHomePageResponse(request.name, list, false)
+        }
         val q = if (request.data.isBlank()) "" else "&${request.data}"
         val json = apiGet("/anime?page=$page$q")
         val items = json.optJSONArray("data") ?: JSONArray()
@@ -112,6 +130,53 @@ class AnimeLibProvider : MainAPI() {
         val hasNext = json.optJSONObject("meta")?.optBoolean("has_next_page", list.size >= 60)
             ?: (list.size >= 60)
         return newHomePageResponse(request.name, list, hasNext)
+    }
+
+    // ---------- Current season ----------
+    // The API has no season filter (seasons[] is ignored), only a year range. So take the most
+    // popular titles of the year, in AnimeLib's own order, and keep the ones that premiered
+    // this season. (rating.votes is always 0 in catalog lists, so it can't rank them.)
+
+    private data class AnimeSeason(val label: String, val start: String)
+
+    private fun seasonOf(now: Calendar): AnimeSeason {
+        val year = now.get(Calendar.YEAR)
+        val (name, startMonth) = when (now.get(Calendar.MONTH)) {
+            in 0..2 -> "зима" to 1
+            in 3..5 -> "весна" to 4
+            in 6..8 -> "літо" to 7
+            else -> "осінь" to 10
+        }
+        // Some premieres air in the last weeks of the previous month
+        val start = Calendar.getInstance().apply {
+            clear()
+            set(year, startMonth - 1, 1)
+            add(Calendar.DAY_OF_MONTH, -14)
+        }
+        return AnimeSeason("$name $year", isoDate(start))
+    }
+
+    private fun isoDate(c: Calendar) = String.format(
+        Locale.ROOT, "%04d-%02d-%02d",
+        c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1, c.get(Calendar.DAY_OF_MONTH)
+    )
+
+    private suspend fun currentSeason(): List<SearchResponse> {
+        val now = Calendar.getInstance()
+        val season = seasonOf(now)
+        val today = isoDate(now)
+        val years = "year_min=${season.start.take(4)}&year_max=${now.get(Calendar.YEAR)}"
+        // 4 pages = the year's 240 most popular titles, which covers the season's notable ones
+        return (1..4).toList().amap { page ->
+            runCatching {
+                val items = apiGet("/anime?page=$page&$years&fields[]=releaseDate")
+                    .optJSONArray("data") ?: JSONArray()
+                (0 until items.length()).map { items.getJSONObject(it) }
+            }.getOrDefault(emptyList())
+        }.flatten()
+            .filter { it.str("releaseDate").take(10) in season.start..today }
+            .distinctBy { it.str("slug_url") }
+            .map { toSearch(it) }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -127,11 +192,23 @@ class AnimeLibProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val slug = slugFromUrl(url)
         val fields = listOf(
-            "summary", "genres", "releaseDate", "rate_avg", "rate", "episodes_count", "otherNames"
+            "summary", "genres", "releaseDate", "rate_avg", "rate", "episodes_count", "otherNames",
+            "time", "publisher",
         ).joinToString("&") { "fields[]=$it" }
-        val d = apiGet("/anime/$slug?$fields").getJSONObject("data")
 
-        val epsJson = apiGet("/episodes?anime_id=$slug").optJSONArray("data") ?: JSONArray()
+        // Independent requests, run in parallel. Only the title itself is required.
+        var details: JSONObject? = null
+        var epsJson = JSONArray()
+        var related = emptyList<SearchResponse>()
+        var similar = emptyList<SearchResponse>()
+        listOf(
+            suspend { details = apiGet("/anime/$slug?$fields").getJSONObject("data") },
+            suspend { epsJson = apiGet("/episodes?anime_id=$slug").optJSONArray("data") ?: JSONArray() },
+            suspend { related = mediaList("/anime/$slug/relations") },
+            suspend { similar = mediaList("/anime/$slug/similar") },
+        ).amap { runCatching { it() } }
+        val d = details ?: apiGet("/anime/$slug?$fields").getJSONObject("data")
+
         val episodes = (0 until epsJson.length()).map { i ->
             val e = epsJson.getJSONObject(i)
             Triple(
@@ -141,17 +218,12 @@ class AnimeLibProvider : MainAPI() {
             )
         }
 
-        fun build(kind: String) = episodes.map { (id, e, num) ->
-            newEpisode("$id|$kind") {
-                this.name = e.str("name").ifBlank { null }
-                this.episode = num
-                this.season = e.str("season").toIntOrNull()
-            }
-        }
-
         val genres = d.optJSONArray("genres")?.let { g ->
             (0 until g.length()).map { g.getJSONObject(it).str("name") }
-        }
+        }.orEmpty()
+        val studios = d.optJSONArray("publisher")?.let { p ->
+            (0 until p.length()).map { p.getJSONObject(it).str("name") }.filter { it.isNotBlank() }
+        }.orEmpty()
         val year = d.str("releaseDate").take(4).toIntOrNull()
         val rating = d.optJSONObject("rating")?.str("average")?.toDoubleOrNull()
         val statusLabel = d.optJSONObject("status")?.str("label")
@@ -160,6 +232,21 @@ class AnimeLibProvider : MainAPI() {
         val shikiMalId = Regex("""/animes/\D*(\d+)""").find(d.str("shikimori_href"))
             ?.groupValues?.get(1)?.toIntOrNull()
         val anilist = anilistInfo(anilistId, shikiMalId)
+
+        fun build(kind: String) = episodes.map { (id, e, num) ->
+            val season = e.str("season").toIntOrNull()
+            // Crunchyroll thumbnails / titles from AniList, for regular episodes only
+            val stream = anilist?.episodes?.get(num)?.takeIf { season != SPECIALS_SEASON }
+            newEpisode("$id|$kind") {
+                this.name = e.str("name").ifBlank { null }
+                    ?: stream?.first
+                    // Recaps and specials without a name: say what they are
+                    ?: e.optJSONObject("status")?.takeIf { it.str("id") != "default" }?.str("label")
+                this.episode = num
+                this.season = season
+                this.posterUrl = stream?.second
+            }
+        }
 
         return newAnimeLoadResponse(d.title(), url, d.tvType()) {
             posterUrl = d.poster()
@@ -171,8 +258,18 @@ class AnimeLibProvider : MainAPI() {
             engName = d.str("eng_name").ifBlank { null }
             japName = d.str("name").ifBlank { null }
             plot = proseToText(d.opt("summary")).ifBlank { null }
-            tags = genres
+            tags = (genres + studios).ifEmpty { null }
             this.year = year
+            duration = d.optJSONObject("time")?.optInt("value")?.takeIf { it > 0 }
+            contentRating = d.optJSONObject("ageRestriction")?.str("label")
+                ?.takeIf { it.isNotBlank() && it != "Нет" }
+            // Sequels / prequels first, then titles similar by genre
+            recommendations = (related + similar).distinctBy { it.url }.ifEmpty { null }
+            anilist?.let { a ->
+                actors = a.actors.ifEmpty { null }
+                nextAiring = a.nextAiring
+                a.trailer?.let { addTrailer(it) }
+            }
             showStatus = when (statusLabel) {
                 "Онгоинг" -> ShowStatus.Ongoing
                 "Завершён" -> ShowStatus.Completed
@@ -183,15 +280,37 @@ class AnimeLibProvider : MainAPI() {
                 addEpisodes(DubStatus.Dubbed, build("dub"))
                 addEpisodes(DubStatus.Subbed, build("sub"))
             }
+            // AnimeLib puts specials and recaps into season 10000
+            if (episodes.any { (_, e, _) -> e.str("season") == SPECIALS_SEASON.toString() }) {
+                seasonNames = listOf(SeasonData(SPECIALS_SEASON, "Спешли", null))
+            }
         }
     }
 
-    private data class AniListInfo(val id: Int?, val malId: Int?, val background: String?)
+    /** Anime entries of a /relations or /similar response (manga and ranobe are skipped). */
+    private suspend fun mediaList(path: String): List<SearchResponse> {
+        val items = apiGet(path).optJSONArray("data") ?: return emptyList()
+        return (0 until items.length())
+            .mapNotNull { items.optJSONObject(it)?.optJSONObject("media") }
+            .filter { it.str("model") == "anime" && it.str("slug_url").isNotBlank() }
+            .map { toSearch(it) }
+    }
+
+    private data class AniListInfo(
+        val id: Int?,
+        val malId: Int?,
+        val background: String?,
+        val trailer: String?,
+        val nextAiring: NextAiring?,
+        val actors: List<ActorData>,
+        /** Episode number -> (title, thumbnail), from Crunchyroll via AniList */
+        val episodes: Map<Int, Pair<String?, String?>>,
+    )
 
     /**
-     * AniList / MAL ids and a wide background, looked up by AniList id or, failing that, by
-     * MAL id. AnimeLib covers need a Referer header, which some CloudStream views (e.g. the
-     * home hero banner) don't send, so they fail with 403.
+     * Extra info from AniList, looked up by AniList id or, failing that, by MAL id: the ids
+     * for tracker sync, a wide background (AnimeLib covers need a Referer header, which some
+     * CloudStream views don't send), trailer, next episode, characters and episode thumbnails.
      */
     private suspend fun anilistInfo(id: Int?, malId: Int?): AniListInfo? = runCatching {
         val (arg, value) = when {
@@ -199,18 +318,71 @@ class AnimeLibProvider : MainAPI() {
             malId != null -> "idMal" to malId
             else -> return null
         }
-        val body = """{"query":"query(${'$'}v:Int){Media($arg:${'$'}v,type:ANIME){id idMal bannerImage coverImage{extraLarge}}}","variables":{"v":$value}}"""
+        val query = "query(\$v:Int){Media($arg:\$v,type:ANIME){id idMal bannerImage " +
+            "coverImage{extraLarge} trailer{id site} nextAiringEpisode{episode airingAt} " +
+            "characters(sort:[ROLE,RELEVANCE],perPage:25){edges{role node{name{full} " +
+            "image{medium}} voiceActors(language:JAPANESE){name{full} image{medium}}}} " +
+            "streamingEpisodes{title thumbnail}}}"
+        val body = JSONObject().put("query", query)
+            .put("variables", JSONObject().put("v", value)).toString()
         val text = app.post(
             "https://graphql.anilist.co",
             requestBody = body.toRequestBody("application/json".toMediaType()),
             headers = mapOf("Accept" to "application/json"),
         ).text
         val m = JSONObject(text).getJSONObject("data").getJSONObject("Media")
+
+        val trailer = m.optJSONObject("trailer")
+            ?.takeIf { it.str("site") == "youtube" && it.str("id").isNotBlank() }
+            ?.let { "https://www.youtube.com/watch?v=${it.str("id")}" }
+
+        val next = m.optJSONObject("nextAiringEpisode")?.let {
+            NextAiring(it.optInt("episode"), it.optLong("airingAt"), null)
+        }?.takeIf { it.episode > 0 && it.unixTime > 0 }
+
+        val edges = m.optJSONObject("characters")?.optJSONArray("edges") ?: JSONArray()
+        val actors = (0 until edges.length()).mapNotNull { i ->
+            val edge = edges.getJSONObject(i)
+            val node = edge.optJSONObject("node") ?: return@mapNotNull null
+            val name = node.optJSONObject("name")?.str("full")?.ifBlank { null }
+                ?: return@mapNotNull null
+            val va = edge.optJSONArray("voiceActors")?.optJSONObject(0)?.let { v ->
+                v.optJSONObject("name")?.str("full")?.ifBlank { null }?.let {
+                    Actor(it, v.optJSONObject("image")?.str("medium")?.ifBlank { null })
+                }
+            }
+            ActorData(
+                Actor(name, node.optJSONObject("image")?.str("medium")?.ifBlank { null }),
+                role = when (edge.str("role")) {
+                    "MAIN" -> ActorRole.Main
+                    "SUPPORTING" -> ActorRole.Supporting
+                    else -> ActorRole.Background
+                },
+                voiceActor = va,
+            )
+        }
+
+        // Titles look like "Episode 3 - Name"; map them by that number
+        val streams = m.optJSONArray("streamingEpisodes") ?: JSONArray()
+        val episodes = (0 until streams.length()).mapNotNull { i ->
+            val s = streams.getJSONObject(i)
+            val match = Regex("""^Episode\s+(\d+)\s*[-–:]?\s*(.*)$""").find(s.str("title"))
+                ?: return@mapNotNull null
+            match.groupValues[1].toInt() to Pair(
+                match.groupValues[2].trim().ifBlank { null },
+                s.str("thumbnail").takeIf { it.startsWith("http") },
+            )
+        }.toMap()
+
         AniListInfo(
             id = m.str("id").toIntOrNull(),
             malId = m.str("idMal").toIntOrNull(),
             background = m.str("bannerImage").takeIf { it.startsWith("http") }
                 ?: m.optJSONObject("coverImage")?.str("extraLarge")?.takeIf { it.startsWith("http") },
+            trailer = trailer,
+            nextAiring = next,
+            actors = actors,
+            episodes = episodes,
         )
     }.getOrNull()
 
@@ -227,17 +399,21 @@ class AnimeLibProvider : MainAPI() {
         val players = apiGet("/episodes/$episodeId").getJSONObject("data").optJSONArray("players")
             ?: return false
 
-        data class Src(val team: String, val src: String)
+        data class Src(val team: String, val src: String, val isSub: Boolean)
 
-        val sources = (0 until players.length()).map { players.getJSONObject(it) }
+        val all = (0 until players.length()).map { players.getJSONObject(it) }
             .filter { it.str("player") == "Kodik" && it.str("src").isNotBlank() }
-            .filter {
+            .map {
                 val isSub = it.optJSONObject("translation_type")?.str("label")
                     ?.contains("Субтитр") == true
-                isSub == wantSub
+                Src(it.optJSONObject("team")?.str("name") ?: "Kodik", it.str("src"), isSub)
             }
-            .map { Src(it.optJSONObject("team")?.str("name") ?: "Kodik", it.str("src")) }
             .distinctBy { it.src }
+        // Some episodes (often specials) only exist as subs or only as dubs: rather than
+        // showing nothing, offer the other kind, marked in the source name.
+        val sources = all.filter { it.isSub == wantSub }.ifEmpty {
+            all.map { it.copy(team = it.team + if (it.isSub) " (субтитри)" else " (озвучка)") }
+        }
 
         // Resolve in parallel, but hand the links over in a fixed order: every link has the
         // same priority, so the player starts the first one it got. Recently used dubs go first.
